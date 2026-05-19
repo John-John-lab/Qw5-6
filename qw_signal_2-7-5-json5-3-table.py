@@ -5736,7 +5736,7 @@ def redownload_all_existing(n_clicks):
         return f"❌ Error: {str(e)}"
 
 @app.callback(
-    Output("bulk-rerun-status", "children"),
+    Output("bulk-rerun-status", "children", allow_duplicate=True),
     Input("bulk-rerun-events", "n_clicks"),
     Input("bulk-rerun-strategy", "n_clicks"),
     Input("bulk-rerun-impulse", "n_clicks"),
