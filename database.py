@@ -745,13 +745,6 @@ def register_database_callbacks(app):
         # It will be handled by a wrapper in the main app
         return "⚠️ This function requires task manager access. Please use the Tasks tab."
 
-    # Redownload all existing data
-    @app.callback(
-        Output("redownload-all-status", "children"),
-        Input("redownload-all-btn", "n_clicks"),
-        prevent_initial_call=True
-    )
-    def redownload_all_existing(n_clicks):
-        # This callback needs access to DownloadTask and tm from main app
-        # It will be handled by a wrapper in the main app
-        return "⚠️ This function requires task manager access. Please use the Tasks tab."
+    # Redownload all existing data - REMOVED: This callback requires DownloadTask and tm
+    # from the main app, so it has been kept in qw_signal_2-7-5-json5-3-table.py
+    # The database.py version was just a placeholder.
