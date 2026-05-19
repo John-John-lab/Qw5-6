@@ -6313,7 +6313,11 @@ def poll_recalc_progress(_):
                 return f"✅ Recalculation complete. ({recalc_bg['count']}/{recalc_bg['total']} tasks updated)", trigger_val
             return f"✅ Recalculation complete. ({recalc_bg['count']}/{recalc_bg['total']} tasks updated)", dash.no_update
         else:
-            return no_update, dash.no_update
+            # Only return no_update if recalculation never started
+            if recalc_bg["count"] == 0:
+                return no_update, dash.no_update
+            # Otherwise show completion status even without total
+            return f"✅ Recalculation complete. ({recalc_bg['count']} tasks updated)", dash.no_update
     return f"⏳ Recalculating... {recalc_bg['count']}/{recalc_bg['total']} completed", dash.no_update
 
 # 🔧 NEW: Dedicated poller for triggering UI refresh after recalculation completes
