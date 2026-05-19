@@ -3699,25 +3699,38 @@ _cached_golden_version = None
     Input("recalc-lock-store", "data"),
     Input("analysis-complete-trigger", "data")  # 🔧 NEW: Trigger UI refresh after recalculation completes
 )
-# ============================================================================
-# UI RENDERING FUNCTIONS (Pure Presentation Layer)
-# These functions take processed data and return Dash layout components only.
-# They do NOT perform calculations, filtering, or business logic decisions.
-# ============================================================================
-
-def render_task_table_row(t):
-    """
-    Render a single task object as an HTML table row.
-    Input: DownloadTask object with all fields populated
-    Output: html.Tr component with formatted cells
-    """
-    # Format display values using extracted UI helpers
-    direction_display = t.signal_direction if t.signal_direction else "-"
-    signal_time_display = fmt_time_ui(t.signal_time) if t.signal_time else "-"
-    first_event_display = fmt_time_ui(t.first_event_time)
-    pin_display = "Yes" if t.first_event_is_pin else "No" if t.first_event_time else "-"
-    price_change_display = f"{t.price_change_pct:.2f}%" if t.price_change_pct is not None else "-"
-    reached_display = "Yes" if t.reached_level else "No"
+def update_task_table_only(current_page, version, lock_state, analysis_trigger):
+    """Render task table ONLY. Uses aggressive caching to skip HTML generation on page changes."""
+    global golden_task_store_data, golden_store_version, _page_html_cache, _cached_golden_version, cached_signal_stats_html, cached_small_stats_data, stats_cache_version
+    
+    # Initialize timer for full trace
+    timer = PerfTimer(f"Page {current_page} Render (v{version})").start()
+    
+    # Validate global state
+    if not hasattr(app, 'layout') or app.layout is None:
+        timer.check("Validation Failed").end()
+        return html.Div("", style={"display": "none"})
+    
+    # Get triggered input
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        timer.check("No Trigger").end()
+        return dash.no_update
+        
+    triggered_id = ctx.triggered[0]['prop_id'].split('.')[0]
+    print(f"[DEBUG] 🔍 TRIGGER: {triggered_id} | version={version} | page={current_page}")
+    timer.check(f"Trigger Detected: {triggered_id}")
+    
+    # If only lock changed, don't re-render table
+    if triggered_id == "recalc-lock-store" and version == getattr(update_task_table_only, '_last_version', None):
+        print(f"[TRACE] Skipping render - lock change only")
+        timer.check("Lock Skip").end()
+        return dash.no_update
+    
+    update_task_table_only._last_version = version
+    print(f"[DEBUG] 📊 STATE: golden_store_version={golden_store_version}, cache_size={len(_page_html_cache)}")
+    
+    # Lock check
     reversed_display = "Yes" if t.reversed_direction else "No"
     hit_1_display = "Yes" if t.hit_1 else "No"
     hit_1_5_display = "Yes" if t.hit_1_5 else "No"
