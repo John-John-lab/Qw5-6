@@ -3729,7 +3729,15 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
     
     update_task_table_only._last_version = version
     print(f"[DEBUG] 📊 STATE: golden_store_version={golden_store_version}, cache_size={len(_page_html_cache)}")
-    
+    timer.check("State Check")
+
+
+# ============================================================================
+# 🔧 HELPER FUNCTION: Render single task table row
+# ============================================================================
+
+def render_task_table_row(t):
+    """Render a single task row for the table. Takes task object 't' as parameter."""
     # Lock check
     reversed_display = "Yes" if t.reversed_direction else "No"
     hit_1_display = "Yes" if t.hit_1 else "No"
