@@ -5745,7 +5745,7 @@ def redownload_all_existing(n_clicks):
 def bulk_rerun_all(ev_n, str_n, imp_n):
     triggered = ctx.triggered_id
     if not triggered:
-        return "Ready"
+        return no_update
     
     tasks = tm.get_all_tasks()
     completed = [t for t in tasks if t.status == "completed"]
