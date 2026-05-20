@@ -3699,25 +3699,121 @@ _cached_golden_version = None
     Input("recalc-lock-store", "data"),
     Input("analysis-complete-trigger", "data")  # 🔧 NEW: Trigger UI refresh after recalculation completes
 )
+def update_task_table_only(current_page, version, lock_state, analysis_trigger):
+    """Render task table ONLY. Uses aggressive caching to skip HTML generation on page changes."""
+    global golden_task_store_data, golden_store_version, _page_html_cache, _cached_golden_version, cached_signal_stats_html, cached_small_stats_data, stats_cache_version
+    
+    # Initialize timer for full trace
+    timer = PerfTimer(f"Page {current_page} Render (v{version})").start()
+    
+    # Validate global state
+    if not hasattr(app, 'layout') or app.layout is None:
+        timer.check("Validation Failed").end()
+        return html.Div("", style={"display": "none"})
+    
+    # Get triggered input
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        timer.check("No Trigger").end()
+        return dash.no_update
+        
+    triggered_id = ctx.triggered[0]['prop_id'].split('.')[0]
+    print(f"[DEBUG] 🔍 TRIGGER: {triggered_id} | version={version} | page={current_page}")
+    timer.check(f"Trigger Detected: {triggered_id}")
+    
+    # If only lock changed, don't re-render table
+    if triggered_id == "recalc-lock-store" and version == getattr(update_task_table_only, '_last_version', None):
+        print(f"[TRACE] Skipping render - lock change only")
+        timer.check("Lock Skip").end()
+        return dash.no_update
+    
+    update_task_table_only._last_version = version
+    print(f"[DEBUG] 📊 STATE: golden_store_version={golden_store_version}, cache_size={len(_page_html_cache)}")
+    timer.check("State Check")
+
+    # Lock check
+    if lock_state and lock_state.get("locked", False):
+        timer.check("Lock Active").end()
+        return html.Div("⏳ Recalculating... Please wait", style={"textAlign": "center", "padding": "20px", "fontSize": "16px", "color": "#666"})
+
+    # Get tasks from Golden Store
+    t0 = time.time()
+    if golden_task_store_data is not None and len(golden_task_store_data) > 0:
+        tasks = golden_task_store_data
+        print(f"[TRACE] ✓ Loaded {len(tasks)} tasks from golden store")
+    else:
+        with tm.lock:
+            tasks = list(tm.tasks.values())
+        print(f"[TRACE] ✓ Loaded {len(tasks)} tasks from task_manager")
+    timer.check(f"Step 1: Get Data ({len(tasks)} tasks)")
+
+    if not tasks:
+        print("[TRACE] ✗ No tasks found")
+        timer.end()
+        return "No tasks."
+
+    # CRITICAL CACHE CHECK
+    current_golden_version = golden_store_version
+    print(f"[TRACE] Version check: cached={_cached_golden_version}, current={current_golden_version}")
+
+    # Invalidate cache if data changed
+    if _cached_golden_version != current_golden_version:
+        print(f"[TRACE] 🔄 Cache invalidated: {_cached_golden_version} -> {current_golden_version}")
+        _page_html_cache.clear()
+        _cached_golden_version = current_golden_version
+        timer.check("Cache Invalidated")
+
+    # ⚡ CRITICAL FIX: Cache MUST use version in key to avoid stale data
+    cache_key = f"page_{current_page}_v{current_golden_version}"
+
+    # Return cached page if available (INSTANT - no HTML generation)
+    if cache_key in _page_html_cache:
+        print(f"[TRACE] ⚡ CACHE HIT for key '{cache_key}'! Returning cached page {current_page}")
+        timer.check("Cache Hit").end()
+        return _page_html_cache[cache_key]
+
+    print(f"[TRACE] ❌ CACHE MISS for key '{cache_key}'. Will generate rows.")
+    timer.check("Cache Miss Confirmed")
+
+    force_refresh = version is not None and version > 0
+
+    # Pagination Slicing
+    PAGE_SIZE = 300
+    total_pages = max(1, (len(tasks) + PAGE_SIZE - 1) // PAGE_SIZE)
+    current_page = max(0, min(current_page or 0, total_pages - 1))
+    start_idx = current_page * PAGE_SIZE
+    end_idx = start_idx + PAGE_SIZE
+    visible_tasks = tasks[start_idx:end_idx]
+    print(f"[TRACE] ✂️ Sliced tasks [{start_idx}:{end_idx}] → {len(visible_tasks)} visible")
+    timer.check(f"Step 2: Pagination Slice")
+
+    # Detect if this is ONLY a page navigation (no data change)
+    prev_golden_version = getattr(update_task_table_only, '_last_golden_version', None)
+    is_page_only_nav = (triggered_id == "task-page-store") and (prev_golden_version is not None) and (current_golden_version == prev_golden_version)
+
+    # 🔧 CRITICAL FIX: Also treat analysis_trigger as a data change (not page nav)
+    # This ensures full stats are calculated after recalculation completes
+    if triggered_id == "analysis-complete-trigger":
+        is_page_only_nav = False
+        print(f"[TRACE] 🔄 Analysis trigger detected - forcing full stats recalculation")
+
+    print(f"[TRACE] Navigation detection: triggered={triggered_id}, prev_ver={prev_golden_version}, curr_ver={current_golden_version} → is_page_only_nav={is_page_only_nav}")
+    timer.check("Navigation Detection")
+
+    # Store current state for next comparison
+    update_task_table_only._last_golden_version = current_golden_version
+    update_task_table_only._last_page = current_page
+
+    timer.check("Step 3: Helper Functions Setup")
+
+
 # ============================================================================
-# UI RENDERING FUNCTIONS (Pure Presentation Layer)
-# These functions take processed data and return Dash layout components only.
-# They do NOT perform calculations, filtering, or business logic decisions.
+# 🔧 HELPER FUNCTION: Render single task table row
 # ============================================================================
 
 def render_task_table_row(t):
-    """
-    Render a single task object as an HTML table row.
-    Input: DownloadTask object with all fields populated
-    Output: html.Tr component with formatted cells
-    """
-    # Format display values using extracted UI helpers
-    direction_display = t.signal_direction if t.signal_direction else "-"
-    signal_time_display = fmt_time_ui(t.signal_time) if t.signal_time else "-"
-    first_event_display = fmt_time_ui(t.first_event_time)
-    pin_display = "Yes" if t.first_event_is_pin else "No" if t.first_event_time else "-"
-    price_change_display = f"{t.price_change_pct:.2f}%" if t.price_change_pct is not None else "-"
-    reached_display = "Yes" if t.reached_level else "No"
+    """Render a single task row for the table. Takes task object 't' as parameter."""
+    # Lock check
     reversed_display = "Yes" if t.reversed_direction else "No"
     hit_1_display = "Yes" if t.hit_1 else "No"
     hit_1_5_display = "Yes" if t.hit_1_5 else "No"
@@ -4126,9 +4222,13 @@ def render_signal_stats_table(tasks):
     return html.Table([html.Tbody(signal_stats_rows)], style={"border": "1px solid #4a90e2", "padding": "5px", "marginTop": "10px", "backgroundColor": "#f0f7ff"})
 
 
-def update_task_table_only(current_page, version, lock_state, analysis_trigger):
-    """Render task table ONLY. Uses aggressive caching to skip HTML generation on page changes."""
-    global golden_task_store_data, golden_store_version, _page_html_cache, _cached_golden_version, cached_signal_stats_html, cached_small_stats_data, stats_cache_version
+# 🔧 REMOVED DUPLICATE: This was a duplicate function definition without @app.callback decorator
+# The actual callback is defined at line 3695 with the proper @app.callback decorator
+# def update_task_table_only(current_page, version, lock_state, analysis_trigger):
+#     \"\"\"Render task table ONLY. Uses aggressive caching to skip HTML generation on page changes.\"\"\"
+#     global golden_task_store_data, golden_store_version, _page_html_cache, _cached_golden_version, cached_signal_stats_html, cached_small_stats_data, stats_cache_version
+
+
     
     # Initialize timer for full trace
     timer = PerfTimer(f"Page {current_page} Render (v{version})").start()
@@ -4935,164 +5035,12 @@ def update_task_chart(task_id, rsi_visible, strategy_visible, impulse_visible, e
     fig.update_xaxes(tickformat="%H:%M", ticklabelmode="period", ticks="outside")
     return fig
 
-# ----- Verification callbacks (unchanged) -----
-@app.callback(
-    Output("start-verify-btn", "disabled"),
-    Output("start-deep-verify-btn", "disabled"),
-    Output("stop-verify-btn", "disabled"),
-    Input("start-verify-btn", "n_clicks"),
-    Input("start-deep-verify-btn", "n_clicks"),
-    Input("stop-verify-btn", "n_clicks"),
-    prevent_initial_call=True
-)
-def control_verification(start_clicks, deep_clicks, stop_clicks):
-    triggered = ctx.triggered_id
-    if triggered == "start-verify-btn" and not vm.running:
-        vm.start_verification(deep=False)
-        return True, True, False
-    elif triggered == "start-deep-verify-btn" and not vm.running:
-        vm.start_verification(deep=True)
-        return True, True, False
-    elif triggered == "stop-verify-btn" and vm.running:
-        vm.stop_verification()
-        return no_update, no_update, no_update
-    return no_update, no_update, no_update
-
-@app.callback(
-    Output("start-verify-btn", "disabled", allow_duplicate=True),
-    Output("start-deep-verify-btn", "disabled", allow_duplicate=True),
-    Output("stop-verify-btn", "disabled", allow_duplicate=True),
-    Input("verify-interval", "n_intervals"),
-    prevent_initial_call=True
-)
-def update_button_states(_):
-    if not vm.running:
-        return False, False, True
-    return True, True, False
-
-@app.callback(
-    Output("verify-log", "children"),
-    Input("verify-interval", "n_intervals")
-)
-def update_verify_log(_):
-    return vm.get_logs()
-
-@app.callback(
-    Output("download-report", "data"),
-    Input("generate-report-btn", "n_clicks"),
-    prevent_initial_call=True
-)
-def generate_report(_):
-    report = vm.generate_integrity_report()
-    report_str = json.dumps(report, indent=2)
-    return dcc.send_string(report_str, f"integrity_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
-
-@app.callback(
-    Output("duckdb-result", "children"),
-    Input("run-duckdb-btn", "n_clicks"),
-    prevent_initial_call=True
-)
-def run_duckdb_query(_):
-    if not DUCKDB_AVAILABLE:
-        return "DuckDB not installed. Please run: pip install duckdb"
-    try:
-        conn = duckdb.connect()
-        query = """
-        SELECT
-        regexp_extract(filename, 'market_data/([^/]+)/', 1) as symbol,
-        COUNT(*) as candle_count,
-        MIN(timestamp) as earliest,
-        MAX(timestamp) as latest,
-        AVG(close) as avg_close,
-        STDDEV(close) as volatility,
-        SUM(volume) as total_volume
-        FROM read_parquet('market_data/*/60/data.parquet', filename=true)
-        GROUP BY symbol
-        ORDER BY symbol
-        """
-        df = conn.execute(query).df()
-        return df.to_string()
-    except Exception as e:
-        return f"Error: {e}"
-
-@app.callback(
-    Output("chart-timeframe-dropdown", "options"),
-    Input("chart-symbol-dropdown", "value")
-)
-def update_timeframe_options(selected_symbol):
-    if not selected_symbol:
-        return []
-    info = get_database_info()
-    timeframes = sorted(set(
-        d["timeframe"] for d in info["details"] if d["symbol"] == selected_symbol
-    ))
-    return [{"label": tf, "value": tf} for tf in timeframes]
-
-@app.callback(
-    Output("candlestick-chart", "figure"),
-    Input("chart-symbol-dropdown", "value"),
-    Input("chart-timeframe-dropdown", "value")
-)
-def update_chart(symbol, timeframe):
-    if not symbol or not timeframe:
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                            vertical_spacing=0.05, row_heights=[0.7, 0.3])
-        fig.update_layout(title="Select a symbol and timeframe to view chart")
-        return fig
-    path = symbol_timeframe_path(symbol, timeframe)
-    file_path = os.path.join(path, "data.parquet")
-    if not os.path.exists(file_path):
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                            vertical_spacing=0.05, row_heights=[0.7, 0.3])
-        fig.update_layout(title=f"No data for {symbol} {timeframe}")
-        return fig
-    df = pd.read_parquet(file_path)
-    if df.empty:
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                            vertical_spacing=0.05, row_heights=[0.7, 0.3])
-        fig.update_layout(title=f"Empty data for {symbol} {timeframe}")
-        return fig
-    df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                        vertical_spacing=0.05, row_heights=[0.7, 0.3])
-    fig.add_trace(go.Candlestick(
-        x=df['date'],
-        open=df['open'],
-        high=df['high'],
-        low=df['low'],
-        close=df['close'],
-        name="OHLC",
-        increasing_line_color='#26a69a',
-        decreasing_line_color='#ef5350'
-    ), row=1, col=1)
-    colors = ['#26a69a' if row['close'] >= row['open'] else '#ef5350' for _, row in df.iterrows()]
-    fig.add_trace(go.Bar(
-        x=df['date'],
-        y=df['volume'],
-        name="Volume",
-        marker_color=colors,
-        showlegend=False
-    ), row=2, col=1)
-    fig.update_layout(
-        title=f"{symbol} – {timeframe}",
-        xaxis_rangeslider_visible=False,
-        template="plotly_white",
-        hovermode="x unified",
-        height=600,
-        margin=dict(l=50, r=50, t=50, b=50)
-    )
-    fig.update_xaxes(title_text="Date", row=2, col=1)
-    fig.update_yaxes(title_text="Price", row=1, col=1)
-    fig.update_yaxes(title_text="Volume", row=2, col=1)
-    return fig
-
-@app.callback(Output("download-db", "data"),
-              Input("download-db-btn", "n_clicks"),
-              prevent_initial_call=True)
-def backup(_):
-    zip_name = f"market_data_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
-    shutil.make_archive(zip_name.replace('.zip', ''), 'zip', MARKET_DATA_DIR)
-    return dcc.send_file(zip_name)
+# =============================================================================
+# NOTE: Database-related callbacks have been moved to database.py
+# and are registered via register_database_callbacks(app) below.
+# This includes: verification controls, chart updates, delete operations,
+# download functions, and database maintenance callbacks.
+# =============================================================================
 
 # ----- Impulse callbacks -----
 @app.callback(
@@ -5771,117 +5719,12 @@ def rerun_impulse_on_all(n_clicks, range_mult, vol_mult, body_ratio, wick_ratio,
             task.add_log(f"Re‑run Impulse on All error: {e}")
     return f"Re‑run Impulse completed on {success} tasks. Total impulse signals: {total_impulse}"
 
-# ----- Database Maintenance Callbacks -----
-@app.callback(
-    Output("clean-symbol", "options"),
-    Input("main-tabs", "value")
-)
-def update_clean_symbols(tab):
-    if tab != "tab-analysis":
-        return []
-    info = get_database_info()
-    symbols = sorted(set(d["symbol"] for d in info["details"]))
-    return [{"label": s, "value": s} for s in symbols]
-
-@app.callback(
-    Output("clean-timeframe", "options"),
-    Input("clean-symbol", "value")
-)
-def update_clean_timeframes(symbol):
-    if not symbol:
-        return []
-    info = get_database_info()
-    timeframes = sorted(set(d["timeframe"] for d in info["details"] if d["symbol"] == symbol))
-    return [{"label": tf, "value": tf} for tf in timeframes]
-
-@app.callback(
-    Output("delete-status", "children"),
-    Input("delete-selected-btn", "n_clicks"),
-    State("clean-symbol", "value"),
-    State("clean-timeframe", "value"),
-    prevent_initial_call=True
-)
-def delete_selected_data(n_clicks, symbol, timeframe):
-    if not symbol or not timeframe:
-        return "❌ Please select both symbol and timeframe."
-    path = symbol_timeframe_path(symbol, timeframe)
-    fp = os.path.join(path, "data.parquet")
-    if not os.path.exists(fp):
-        return f"⚠️ Data file not found for {symbol} {timeframe}."
-    try:
-        os.remove(fp)
-        if os.path.exists(path) and not os.listdir(path):
-            os.rmdir(path)
-        return f"✅ Deleted {symbol} {timeframe} data. You can now re‑run tasks with 'Overwrite' checked."
-    except Exception as e:
-        return f"❌ Error deleting: {str(e)}"
-
-@app.callback(
-    Output("delete-all-btn", "disabled"),
-    Input("confirm-delete-all", "value")
-)
-def enable_delete_all(confirm):
-    return "confirm" not in confirm
-
-@app.callback(
-    Output("delete-status", "children", allow_duplicate=True),
-    Input("delete-all-btn", "n_clicks"),
-    prevent_initial_call=True
-)
-def delete_all_data(n_clicks):
-    if n_clicks is None:
-        return ""
-    try:
-        import shutil
-        shutil.rmtree(MARKET_DATA_DIR)
-        os.makedirs(MARKET_DATA_DIR, exist_ok=True)
-        return "✅ All market data deleted. You can now re‑run tasks to download fresh data."
-    except Exception as e:
-        return f"❌ Error deleting all data: {str(e)}"
-
-@app.callback(
-    Output("delete-status", "children", allow_duplicate=True),
-    Input("redownload-full-btn", "n_clicks"),
-    State("clean-symbol", "value"),
-    State("clean-timeframe", "value"),
-    prevent_initial_call=True
-)
-def redownload_full_history(n_clicks, symbol, timeframe):
-    if not symbol or not timeframe:
-        return "❌ Please select both symbol and timeframe."
-    # Delete existing file first
-    path = symbol_timeframe_path(symbol, timeframe)
-    fp = os.path.join(path, "data.parquet")
-    if os.path.exists(fp):
-        os.remove(fp)
-    if os.path.exists(path) and not os.listdir(path):
-        os.rmdir(path)
-    # Create a task with mode='full'
-    import uuid
-    import time
-    tid = str(uuid.uuid4())
-    fake_signal_time = int(time.time() * 1000)
-    task = DownloadTask(
-        task_id=tid,
-        symbols=[symbol],
-        timeframe=timeframe,
-        mode='full',
-        start_date=None,
-        end_date=None,
-        overwrite=True,
-        price_continuity_check=False,
-        signal_time=fake_signal_time,
-        signal_price=0,
-        signal_symbol=symbol,
-        signal_direction='resistance',
-        analyze_beyond=False,
-        enable_strategy=False,
-        enable_impulse=False,
-        pre_buffer_minutes=5
-    )
-    tm.add_task(task)
-    task.add_log(f"Re‑download full history for {symbol} {timeframe}")
-    return f"🔄 Started re‑download of full history for {symbol} {timeframe}. Watch the Tasks tab for progress."
+# =============================================================================
+# NOTE: Database Maintenance callbacks have been moved to database.py
+# and are registered via register_database_callbacks(app) below.
+# This includes: clean-symbol/timeframe options, delete operations,
+# redownload functions, and database backup functionality.
+# =============================================================================
 
 # ----- Active Download Monitor Callbacks -----
 @app.callback(
@@ -5972,7 +5815,7 @@ def redownload_all_existing(n_clicks):
         return f"❌ Error: {str(e)}"
 
 @app.callback(
-    Output("bulk-rerun-status", "children"),
+    Output("bulk-rerun-status", "children", allow_duplicate=True),
     Input("bulk-rerun-events", "n_clicks"),
     Input("bulk-rerun-strategy", "n_clicks"),
     Input("bulk-rerun-impulse", "n_clicks"),
@@ -5981,7 +5824,7 @@ def redownload_all_existing(n_clicks):
 def bulk_rerun_all(ev_n, str_n, imp_n):
     triggered = ctx.triggered_id
     if not triggered:
-        return "Ready"
+        return no_update
     
     tasks = tm.get_all_tasks()
     completed = [t for t in tasks if t.status == "completed"]
@@ -6549,7 +6392,11 @@ def poll_recalc_progress(_):
                 return f"✅ Recalculation complete. ({recalc_bg['count']}/{recalc_bg['total']} tasks updated)", trigger_val
             return f"✅ Recalculation complete. ({recalc_bg['count']}/{recalc_bg['total']} tasks updated)", dash.no_update
         else:
-            return no_update, dash.no_update
+            # Only return no_update if recalculation never started
+            if recalc_bg["count"] == 0:
+                return no_update, dash.no_update
+            # Otherwise show completion status even without total
+            return f"✅ Recalculation complete. ({recalc_bg['count']} tasks updated)", dash.no_update
     return f"⏳ Recalculating... {recalc_bg['count']}/{recalc_bg['total']} completed", dash.no_update
 
 # 🔧 NEW: Dedicated poller for triggering UI refresh after recalculation completes
