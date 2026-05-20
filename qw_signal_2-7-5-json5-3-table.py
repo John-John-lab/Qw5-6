@@ -3731,6 +3731,81 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
     print(f"[DEBUG] 📊 STATE: golden_store_version={golden_store_version}, cache_size={len(_page_html_cache)}")
     timer.check("State Check")
 
+    # Lock check
+    if lock_state and lock_state.get("locked", False):
+        timer.check("Lock Active").end()
+        return html.Div("⏳ Recalculating... Please wait", style={"textAlign": "center", "padding": "20px", "fontSize": "16px", "color": "#666"})
+
+    # Get tasks from Golden Store
+    t0 = time.time()
+    if golden_task_store_data is not None and len(golden_task_store_data) > 0:
+        tasks = golden_task_store_data
+        print(f"[TRACE] ✓ Loaded {len(tasks)} tasks from golden store")
+    else:
+        with tm.lock:
+            tasks = list(tm.tasks.values())
+        print(f"[TRACE] ✓ Loaded {len(tasks)} tasks from task_manager")
+    timer.check(f"Step 1: Get Data ({len(tasks)} tasks)")
+
+    if not tasks:
+        print("[TRACE] ✗ No tasks found")
+        timer.end()
+        return "No tasks."
+
+    # CRITICAL CACHE CHECK
+    current_golden_version = golden_store_version
+    print(f"[TRACE] Version check: cached={_cached_golden_version}, current={current_golden_version}")
+
+    # Invalidate cache if data changed
+    if _cached_golden_version != current_golden_version:
+        print(f"[TRACE] 🔄 Cache invalidated: {_cached_golden_version} -> {current_golden_version}")
+        _page_html_cache.clear()
+        _cached_golden_version = current_golden_version
+        timer.check("Cache Invalidated")
+
+    # ⚡ CRITICAL FIX: Cache MUST use version in key to avoid stale data
+    cache_key = f"page_{current_page}_v{current_golden_version}"
+
+    # Return cached page if available (INSTANT - no HTML generation)
+    if cache_key in _page_html_cache:
+        print(f"[TRACE] ⚡ CACHE HIT for key '{cache_key}'! Returning cached page {current_page}")
+        timer.check("Cache Hit").end()
+        return _page_html_cache[cache_key]
+
+    print(f"[TRACE] ❌ CACHE MISS for key '{cache_key}'. Will generate rows.")
+    timer.check("Cache Miss Confirmed")
+
+    force_refresh = version is not None and version > 0
+
+    # Pagination Slicing
+    PAGE_SIZE = 300
+    total_pages = max(1, (len(tasks) + PAGE_SIZE - 1) // PAGE_SIZE)
+    current_page = max(0, min(current_page or 0, total_pages - 1))
+    start_idx = current_page * PAGE_SIZE
+    end_idx = start_idx + PAGE_SIZE
+    visible_tasks = tasks[start_idx:end_idx]
+    print(f"[TRACE] ✂️ Sliced tasks [{start_idx}:{end_idx}] → {len(visible_tasks)} visible")
+    timer.check(f"Step 2: Pagination Slice")
+
+    # Detect if this is ONLY a page navigation (no data change)
+    prev_golden_version = getattr(update_task_table_only, '_last_golden_version', None)
+    is_page_only_nav = (triggered_id == "task-page-store") and (prev_golden_version is not None) and (current_golden_version == prev_golden_version)
+
+    # 🔧 CRITICAL FIX: Also treat analysis_trigger as a data change (not page nav)
+    # This ensures full stats are calculated after recalculation completes
+    if triggered_id == "analysis-complete-trigger":
+        is_page_only_nav = False
+        print(f"[TRACE] 🔄 Analysis trigger detected - forcing full stats recalculation")
+
+    print(f"[TRACE] Navigation detection: triggered={triggered_id}, prev_ver={prev_golden_version}, curr_ver={current_golden_version} → is_page_only_nav={is_page_only_nav}")
+    timer.check("Navigation Detection")
+
+    # Store current state for next comparison
+    update_task_table_only._last_golden_version = current_golden_version
+    update_task_table_only._last_page = current_page
+
+    timer.check("Step 3: Helper Functions Setup")
+
 
 # ============================================================================
 # 🔧 HELPER FUNCTION: Render single task table row
@@ -4147,9 +4222,13 @@ def render_signal_stats_table(tasks):
     return html.Table([html.Tbody(signal_stats_rows)], style={"border": "1px solid #4a90e2", "padding": "5px", "marginTop": "10px", "backgroundColor": "#f0f7ff"})
 
 
-def update_task_table_only(current_page, version, lock_state, analysis_trigger):
-    """Render task table ONLY. Uses aggressive caching to skip HTML generation on page changes."""
-    global golden_task_store_data, golden_store_version, _page_html_cache, _cached_golden_version, cached_signal_stats_html, cached_small_stats_data, stats_cache_version
+# 🔧 REMOVED DUPLICATE: This was a duplicate function definition without @app.callback decorator
+# The actual callback is defined at line 3695 with the proper @app.callback decorator
+# def update_task_table_only(current_page, version, lock_state, analysis_trigger):
+#     \"\"\"Render task table ONLY. Uses aggressive caching to skip HTML generation on page changes.\"\"\"
+#     global golden_task_store_data, golden_store_version, _page_html_cache, _cached_golden_version, cached_signal_stats_html, cached_small_stats_data, stats_cache_version
+
+
     
     # Initialize timer for full trace
     timer = PerfTimer(f"Page {current_page} Render (v{version})").start()
