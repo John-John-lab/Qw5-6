@@ -1,4 +1,1 @@
-```
-__pycache__/
-*.pyc
-```
+Nothing should be ignored based on the provided file changes, as only a Python source file (`qw_signal_2-7-5-json5-3-table.py`) was modified without any build artifacts, dependencies, or temporary files present in the changes.
