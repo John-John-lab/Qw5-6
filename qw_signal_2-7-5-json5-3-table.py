@@ -5979,22 +5979,23 @@ def save_tasks_to_json(n, filename):
     Output("task-count-store", "data", allow_duplicate=True),
     Output("task-page-store", "data", allow_duplicate=True),
     Output("analysis-complete-trigger", "data", allow_duplicate=True), # 🔧 NEW
+    Output("golden-store-version", "data", allow_duplicate=True), # 🔧 CRITICAL FIX: Update version store to trigger table refresh
     Input("load-tasks-btn", "n_clicks"),
     State("json-file-select", "value"),
     prevent_initial_call=True
 )
 def load_tasks_from_json(n, filepath):
     if not filepath or not os.path.exists(filepath):
-        return "⚠️ Please select a valid JSON file.", [], 0, 0, 0  # 🔧 Added 5th value (trigger=0)
+        return "⚠️ Please select a valid JSON file.", [], 0, 0, 0, dash.no_update  # 🔧 Added 6th value
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
             data = json.load(f)
         if not isinstance(data, list):
-            return "❌ Invalid JSON format: expected a list of tasks.", [], 0, 0, 0  # 🔧 Added 5th value
+            return "❌ Invalid JSON format: expected a list of tasks.", [], 0, 0, 0, dash.no_update  # 🔧 Added 6th value
     except json.JSONDecodeError as e:
-        return f"❌ JSON Syntax Error at line {e.lineno}, col {e.colno}: {e.msg}.", [], 0, 0, 0  # 🔧 Added 5th value
+        return f"❌ JSON Syntax Error at line {e.lineno}, col {e.colno}: {e.msg}.", [], 0, 0, 0, dash.no_update  # 🔧 Added 6th value
     except Exception as e:
-        return f"❌ Load failed: {str(e)}", [], 0, 0, 0  # 🔧 Added 5th value
+        return f"❌ Load failed: {str(e)}", [], 0, 0, 0, dash.no_update  # 🔧 Added 6th value
         
     loaded_ids = []
     skipped = 0
@@ -6076,7 +6077,7 @@ def load_tasks_from_json(n, filepath):
     import time
     trigger_val = int(time.time()) 
     
-    return msg, loaded_ids, count, 0, trigger_val
+    return msg, loaded_ids, count, 0, trigger_val, golden_store_version
 
 @app.callback(
     Output("save-load-status", "children", allow_duplicate=True),
